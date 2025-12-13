@@ -11,6 +11,9 @@ So i was thinking of other ways to speed up implementation. Options include:
  - Spatial Partitioning
  - GPU Paralellization using CuPy
 
+ - Predator/Prey Behaviours
+ - Object Avoidance
+
 
 # Demo
 ![](res/demo.gif)
