@@ -31,7 +31,7 @@ class Quadtree:
         self.maxheight = maxheight
 
     def subdivide(self):
-        recursiveSubdivide(self.root, self.capacity)
+        recursiveSubdivide(self.root, self.capacity, self.maxheight)
 
     def insert(self, point):
         recursiveInsert(self.root, self.capacity, point, self.maxheight)
@@ -122,11 +122,18 @@ def recursiveInsert(node, capacity, point, currHeight):
 
     node.points.append(point)
     if len(node.points) > capacity:
-        recursiveSubdivide(node, capacity)
+        recursiveSubdivide(node, capacity, currHeight)
     return True
 
 
-def recursiveSubdivide(node, capacity):
+def recursiveSubdivide(node, capacity, currHeight):
+    # Stop if within capacity, or if we've hit the depth limit. The depth
+    # limit is what guarantees termination when points are coincident
+    # (e.g. boids at the exact same position), since those always fall into
+    # the same child quadrant and would otherwise subdivide forever.
+    if len(node.points) <= capacity or currHeight == 0:
+        return
+
     newW = node.rectBoundary.w / 2
     newH = node.rectBoundary.h / 2
     x = node.rectBoundary.x
@@ -135,22 +142,22 @@ def recursiveSubdivide(node, capacity):
     topLeftRect = Rectangle(x, y, newW, newH)
     pts = topLeftRect.containsPts(node.points)
     topLeft = Node(topLeftRect, pts)
-    recursiveSubdivide(topLeft, capacity)
+    recursiveSubdivide(topLeft, capacity, currHeight - 1)
 
     topRightRect = Rectangle(x + newW, y, newW, newH)
     pts = topRightRect.containsPts(node.points)
     topRight = Node(topRightRect, pts)
-    recursiveSubdivide(topRight, capacity)
+    recursiveSubdivide(topRight, capacity, currHeight - 1)
 
     botLeftRect = Rectangle(x, y + newH, newW, newH)
     pts = botLeftRect.containsPts(node.points)
     botLeft = Node(botLeftRect, pts)
-    recursiveSubdivide(botLeft, capacity)
+    recursiveSubdivide(botLeft, capacity, currHeight - 1)
 
     botRightRect = Rectangle(x + newW, y + newH, newW, newH)
     pts = botRightRect.containsPts(node.points)
     botRight = Node(botRightRect, pts)
-    recursiveSubdivide(botRight, capacity)
+    recursiveSubdivide(botRight, capacity, currHeight - 1)
 
     node.children = [topLeft, topRight, botLeft, botRight]
     node.points = []
