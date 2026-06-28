@@ -135,9 +135,8 @@ class Flock:
         neighbors = []
 
         if useQtree:
-            #O(nLog(n))) algorithm for finding boids in radius
             circleRange = Circle(myBoid.x, myBoid.y, myBoid.neighborRadius)
-            neighbors.extend(self.quadtree.query(circleRange))
+            neighbors.extend(b for b in self.quadtree.query(circleRange) if b is not myBoid)
         else:
             #O(n^2) algorithm for finding boids in radius
             for boid in self.flock:
@@ -157,16 +156,14 @@ class Flock:
 
         for boid in self.flock:
             neighbors = self.inNeighboorhood(boid, useQtree)
-            #filter out Nones, and other types
-            boidNeighbors = [a for a in neighbors if type(a) == Boid]
 
             acc = m.Vector2(0, 0)
             if useCohesion:
-                acc += (.004 * self.cohesion(boid, boidNeighbors))
+                acc += (.004 * self.cohesion(boid, neighbors))
             if useSeperation:
-                acc += (1.1 * self.seperation(boid, boidNeighbors))
+                acc += (1.1 * self.seperation(boid, neighbors))
             if useAlignment:
-                acc += (.5 * self.alignment(boid, boidNeighbors))
+                acc += (.5 * self.alignment(boid, neighbors))
 
             acc += (1 * self.avoidMouse(boid))
 
@@ -179,9 +176,6 @@ class Flock:
             boid.draw()
 
         if showQtree:
-            #boids have updated, so remake the qtree
-            self.quadtree.reset()
-            self.quadtree.insertPts(self.flock)
             self.quadtree.drawBoundaries()
 
 

@@ -12,14 +12,13 @@ goes down from O(N^2) to O(NlogN).
 """
 
 import pygame
-import queue
 from shapes import *
 
 
 class Node:
-    def __init__(self, rectBoundary, points = []):
+    def __init__(self, rectBoundary, points=None):
         self.rectBoundary = rectBoundary
-        self.points = points
+        self.points = points if points is not None else []
         self.children = []
         self.isSubdivided = False
 
@@ -73,36 +72,25 @@ class Quadtree:
 def recursiveQuery(node, dataList, range):
     if not node.rectBoundary.intersects(range):
         return
-    elif node.isSubdivided:
+    if node.isSubdivided:
         for child in node.children:
-            if child.rectBoundary.intersects(range):
-                recursiveQuery(child, dataList, range)
+            recursiveQuery(child, dataList, range)
         return
-
-    #now have reached a leaf, where the point data is stored
     pts = range.containsPts(node.points)
     dataList.extend(pts)
-    return
 
 
 def iterativeQuery(root, dataList, range):
-    stack = queue.LifoQueue()
-    stack.put(root)
-
-    while not stack.empty():
-        node = stack.get()
-
+    stack = [root]
+    while stack:
+        node = stack.pop()
         if not node.rectBoundary.intersects(range):
             continue
-        elif node.isSubdivided:
-            for child in node.children:
-                stack.put(child)
+        if node.isSubdivided:
+            stack.extend(node.children)
         else:
-            #range intersects the boundary, and the node has not been subdivided
-            #so need to test the points in the node to see if they are within range
             pts = range.containsPts(node.points)
             dataList.extend(pts)
-    return
 
 
 
@@ -121,33 +109,24 @@ def recursiveDrawBoundaries(node, screen):
 def recursiveInsert(node, capacity, point, currHeight):
     if not node.rectBoundary.containsPt(point.x, point.y):
         return False
-    #else boundary contains point
 
-    #if reached max depth, then just force point into list
-    if(currHeight == 0):
+    if currHeight == 0:
         node.points.append(point)
-        node.isSubdivided = False
         return True
 
-    if (not node.isSubdivided) and (len(node.points) <= capacity):
-        node.points.append(point)
-        recursiveSubdivide(node, capacity)
-        return True
-
-    if(node.isSubdivided):
-        #insert into the node's children
-        r = False
+    if node.isSubdivided:
         for child in node.children:
-            r = r or recursiveInsert(child, capacity, point, currHeight - 1)
-        return r
+            if recursiveInsert(child, capacity, point, currHeight - 1):
+                return True
+        return False
+
+    node.points.append(point)
+    if len(node.points) > capacity:
+        recursiveSubdivide(node, capacity)
+    return True
 
 
 def recursiveSubdivide(node, capacity):
-    if len(node.points) <= capacity:
-        #then no need to subdivide
-        return
-
-    #else redistribute points to new 4 quadrants
     newW = node.rectBoundary.w / 2
     newH = node.rectBoundary.h / 2
     x = node.rectBoundary.x

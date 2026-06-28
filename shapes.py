@@ -47,9 +47,9 @@ class Circle:
         self.y = y
 
     def containsPt(self, point):
-        dist = (self.x - point.x) ** 2 + (self.y - point.y) ** 2
-        dist = math.sqrt(dist)
-        return dist <= self.radius
+        dx = self.x - point.x
+        dy = self.y - point.y
+        return dx * dx + dy * dy <= self.radius * self.radius
 
     def containsPts(self, points):
         containsPts = []
@@ -97,20 +97,12 @@ class Rectangle:
             cx = boundary.x
             cy = boundary.y
             cr = boundary.radius
-
-            if self.containsPt(cx, cy):
-                return True
-
-            if(
-                Point.distToLine(cx, cy, l0, t0, l0, b0) <= cr or #check left line intersection
-                Point.distToLine(cx, cy, r0, t0, r0, b0) <= cr or #check right
-                Point.distToLine(cx, cy, l0, t0, r0, t0) <= cr or #check top
-                Point.distToLine(cx, cy, l0, b0, r0, b0) <= cr    #check bottom
-            ):
-                return True
-
-            #else no intersection
-            return False
+            # Closest point on the AABB to the circle center
+            closest_x = max(l0, min(cx, r0))
+            closest_y = max(t0, min(cy, b0))
+            dx = cx - closest_x
+            dy = cy - closest_y
+            return dx * dx + dy * dy <= cr * cr
         raise Exception("boundary should be a Rectangle or Circle type")
 
 
