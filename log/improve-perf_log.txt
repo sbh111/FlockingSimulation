@@ -207,3 +207,129 @@ Two automated checks were run after the fixes:
 2. Correctness test: 2000 random points inserted into the quad-tree.
    200 random circle queries were run and compared against a brute-force scan.
    Result: 0 mismatches out of 200 queries.
+
+
+========================================
+SECOND PASS - ADDITIONAL IMPROVEMENTS
+========================================
+
+A follow-up scan of the whole repository found further bugs, performance
+wins, and code-quality issues. All of the following were applied.
+
+----------------------------------------
+FILE: quad_tree.py
+----------------------------------------
+
+11. Quadtree.insertPts — Fix broken type check (correctness bug)
+    Before:
+        if not type(object) == type(Point):
+            if type(object) == tuple:
+                ... Point(object[0], object[1], object) ...
+            else:
+                ... Point(object.x, object.y, object) ...
+        else:
+            ... insert object directly ...
+    After:
+        if isinstance(object, Point):
+            ... insert object directly ...
+        elif type(object) == tuple:
+            ... Point(object[0], object[1], object) ...
+        else:
+            ... Point(object.x, object.y, object) ...
+
+    Why: type(Point) evaluates to `type` (the metaclass), not the Point
+    class. So `not type(object) == type(Point)` was `type(object) != type`,
+    which is True for every normal object — the branch that inserts an
+    already-built Point directly was dead code. It happened to work because
+    only boids and tuples were ever passed. Replaced with isinstance, which
+    correctly detects Point instances and preserves their .data.
+
+----------------------------------------
+FILE: flock.py
+----------------------------------------
+
+12. Add explicit `import math`
+    Why: avoidMouse uses math.copysign, but flock.py never imported math.
+    It was only available by accident, leaking through
+    `from quad_tree import *` -> `from shapes import *` -> `import math`.
+    If shapes ever stopped importing math, flock would break. Added a direct
+    import so the dependency is explicit and robust.
+
+13. Fuse cohesion / seperation / alignment into a single pass (applyRules)
+    Before: three separate methods, each looping over the full neighbor list,
+    called from draw() as:
+        if useCohesion:   acc += .004 * self.cohesion(boid, neighbors)
+        if useSeperation: acc += 1.1  * self.seperation(boid, neighbors)
+        if useAlignment:  acc += .5   * self.alignment(boid, neighbors)
+    After: one method, applyRules(boid, neighbors, useCohesion, useSeperation,
+    useAlignment), that accumulates the cohesion position-sum, alignment
+    velocity-sum, and separation vector in a single loop, then combines them
+    with the same weights.
+
+    Why: the neighbor list was traversed up to three times per boid per frame.
+    Fusing traverses it once. The combined acceleration is numerically
+    identical to the original (verified: max difference 0.0).
+
+14. Remove redundant distance filter in separation (behavioral, negligible)
+    Before:
+        if boid.pos.distance_to(neighbor.pos) < boid.neighborRadius:
+            ... contribute to separation ...
+    After:
+        ... every neighbor contributes (no filter) ...
+
+    Why: every neighbor returned by the query is already within
+    neighborRadius, so the filter was redundant. It also computed a sqrt via
+    distance_to and then as_polar() recomputed the same magnitude immediately
+    after — duplicate work, O(boids x neighbors) per frame. The only
+    behavioral change is at the exact-radius boundary (< vs <=), which is
+    imperceptible.
+
+----------------------------------------
+FILE: boid.py
+----------------------------------------
+
+15. limitSpeed — Replace polar conversion with length()/scale_to_length
+    Before:
+        r, phi = self.velocity.as_polar()
+        if r > self.maxSpeed:
+            self.velocity.from_polar((self.maxSpeed, phi))
+    After:
+        if self.velocity.length() > self.maxSpeed:
+            self.velocity.scale_to_length(self.maxSpeed)
+
+    Why: numerically equivalent magnitude clamp without the trig of
+    as_polar/from_polar. Called once per boid per frame.
+
+16. update — Update the boid's Circle in place instead of reallocating
+    Before:
+        self.circle = Circle(self.x, self.y, self.neighborRadius)
+    After:
+        self.circle.x = self.x
+        self.circle.y = self.y
+
+    Why: a fresh Circle was allocated every boid every frame; only x and y
+    change (radius is constant), so updating in place avoids the churn.
+
+----------------------------------------
+FILES: main.py, test.py
+----------------------------------------
+
+17. Guard module-level main() with `if __name__ == "__main__":`
+    Why: both files called main() at import time, so merely importing either
+    module (e.g. for testing) would immediately launch the pygame loop. The
+    guard makes them importable without side effects.
+
+========================================
+VERIFICATION (SECOND PASS)
+========================================
+
+1. Numeric equivalence: per-boid acceleration from the fused applyRules
+   compared against the original separate-rule math (filter removed) across
+   a 250-boid flock. Max difference: 0.0.
+
+2. Smoke test: 30 frames of the real draw() loop ran headlessly (SDL dummy
+   driver) with no exceptions; all rule-toggle combinations ran without error.
+
+3. insertPts dispatch: verified tuple, Point, and object-with-x/y inputs all
+   insert correctly, and a Point's .data is preserved (previously-dead branch
+   now reachable).

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(gh pr list --head improve-perf --json url,number,title)",
+      "PowerShell($gh = Get-Command gh -ErrorAction SilentlyContinue; if \\($gh\\) { $gh.Source } else { \"not found\" }; Get-ChildItem \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)",
+      "PowerShell(git push -u origin improve-perf 2>&1)",
+      "PowerShell(\"---\")",
+      "PowerShell($env:GIT_TERMINAL_PROMPT)",
+      "PowerShell(git ls-remote origin improve-perf 2>&1)",
+      "PowerShell($out = git ls-remote origin 2>&1 | Out-String; if \\($LASTEXITCODE -eq 0\\) { \"AUTH OK\"; \\($out -split \"`n\"\\).Count - 1; \"ref lines above\" } else { \"AUTH FAILED exit=$LASTEXITCODE\"; $out })",
+      "Bash(.venv/Scripts/python.exe -c ' *)"
+    ]
+  }
+}

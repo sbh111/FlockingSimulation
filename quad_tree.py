@@ -38,13 +38,12 @@ class Quadtree:
 
     def insertPts(self, objects):
         for object in objects:
-            if not type(object) == type(Point):
-                if type(object) == tuple:
-                    recursiveInsert(self.root, self.capacity, Point(object[0], object[1], object), self.maxheight)
-                else:
-                    recursiveInsert(self.root, self.capacity, Point(object.x, object.y, object), self.maxheight)
-            else:
+            if isinstance(object, Point):
                 recursiveInsert(self.root, self.capacity, object, self.maxheight)
+            elif type(object) == tuple:
+                recursiveInsert(self.root, self.capacity, Point(object[0], object[1], object), self.maxheight)
+            else:
+                recursiveInsert(self.root, self.capacity, Point(object.x, object.y, object), self.maxheight)
 
     def query(self, range, isIterative = False):
         #Passing in a list so no time/space wasted in copying

@@ -6,6 +6,7 @@ This file manages the flock, and applies the Flocking Algorithm to the flock.
 
 import pygame
 import pygame.math as m
+import math
 import random
 from boid import Boid
 from quad_tree import *
@@ -60,46 +61,42 @@ class Flock:
 
     #=================The Rules for Flocking=======================
 
-    def cohesion(self, boid, neighbors):
-        #Rule 1: Boids try to fly towards the center of mass of neighbouring boids.
-        if len(neighbors) == 0:
+    def applyRules(self, boid, neighbors, useCohesion, useSeperation, useAlignment):
+        #Computes the combined acceleration from the three core flocking rules in a
+        #single pass over the neighbor list, instead of iterating it once per rule.
+        #  Rule 1 (Cohesion):   fly towards the center of mass of neighbouring boids.
+        #  Rule 2 (Seperation): keep a small distance away from other boids.
+        #  Rule 3 (Alignment):  match velocity with nearby boids.
+        n = len(neighbors)
+        if n == 0:
             return m.Vector2(0, 0)
 
-        centerOfPos = m.Vector2(0, 0)
+        sumPos = m.Vector2(0, 0)   #for cohesion
+        sumVel = m.Vector2(0, 0)   #for alignment
+        sepAcc = m.Vector2(0, 0)   #for seperation
 
         for neighbor in neighbors:
-            centerOfPos += neighbor.pos
-
-        centerOfPos /= len(neighbors)
-        acc = centerOfPos - boid.pos
-        return acc
-
-    def seperation(self, boid, neighbors):
-        #Rule 2: Boids try to keep a small distance away from other objects (including other boids).
-        if len(neighbors) == 0:
-            return m.Vector2(0, 0)
-
-        acc = m.Vector2(0, 0)
-        for neighbor in neighbors:
-            if boid.pos.distance_to(neighbor.pos) < boid.neighborRadius:
+            if useCohesion:
+                sumPos += neighbor.pos
+            if useAlignment:
+                sumVel += neighbor.velocity
+            if useSeperation:
+                #every neighbor is already within neighborRadius (that's how it was
+                #found), so no distance filter is needed here. Weight by 1/distance.
                 v = (boid.pos - neighbor.pos)
                 r, phi = v.as_polar()
                 if r > 0:
                     r = r**-1
                 v.from_polar((r, phi))
-                acc += v
-        return acc
+                sepAcc += v
 
-    def alignment(self, boid, neighbors):
-        #Rule 3: Boids try to match velocity with nearby boids.
-        if len(neighbors) == 0:
-            return m.Vector2(0, 0)
-
-        v = m.Vector2(0, 0)
-        for neighbor in neighbors:
-            v += neighbor.velocity
-        v /= len(neighbors)
-        acc = v - boid.velocity
+        acc = m.Vector2(0, 0)
+        if useCohesion:
+            acc += .004 * ((sumPos / n) - boid.pos)
+        if useSeperation:
+            acc += 1.1 * sepAcc
+        if useAlignment:
+            acc += .5 * ((sumVel / n) - boid.velocity)
         return acc
 
     def avoidMouse(self, boid):
@@ -157,14 +154,7 @@ class Flock:
         for boid in self.flock:
             neighbors = self.inNeighboorhood(boid, useQtree)
 
-            acc = m.Vector2(0, 0)
-            if useCohesion:
-                acc += (.004 * self.cohesion(boid, neighbors))
-            if useSeperation:
-                acc += (1.1 * self.seperation(boid, neighbors))
-            if useAlignment:
-                acc += (.5 * self.alignment(boid, neighbors))
-
+            acc = self.applyRules(boid, neighbors, useCohesion, useSeperation, useAlignment)
             acc += (1 * self.avoidMouse(boid))
 
             #if Boid has no neighbors, it will just wander randomly

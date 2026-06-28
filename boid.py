@@ -30,10 +30,8 @@ class Boid:
         )
 
     def limitSpeed(self):
-        r, phi = self.velocity.as_polar()
-
-        if r > self.maxSpeed:
-            self.velocity.from_polar((self.maxSpeed, phi))
+        if self.velocity.length() > self.maxSpeed:
+            self.velocity.scale_to_length(self.maxSpeed)
 
     def wrapAround(self):
         x, y = self.pos
@@ -70,7 +68,8 @@ class Boid:
 
         self.x = self.pos.x
         self.y = self.pos.y
-        self.circle = Circle(self.x, self.y, self.neighborRadius)
+        self.circle.x = self.x
+        self.circle.y = self.y
 
 
 

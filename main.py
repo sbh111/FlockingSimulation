@@ -92,4 +92,7 @@ def main():
         display.fill((10, 10, 60))
         flock.draw(useTree, showTree, useCohesion, useSeperation, useAlignment)
         pygame.display.flip()
-main()
+
+
+if __name__ == "__main__":
+    main()
