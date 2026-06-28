@@ -1,0 +1,209 @@
+Branch: improve-perf
+Date: 2026-06-28
+Author: Saad Bhatti
+
+========================================
+SUMMARY OF CHANGES
+========================================
+
+Goal: The quad-tree neighbour search was slower than the brute-force O(n^2)
+approach despite being theoretically O(n log n). Several bugs and inefficiencies
+were identified and fixed across three files.
+
+----------------------------------------
+FILE: shapes.py
+----------------------------------------
+
+1. Circle.containsPt — Remove sqrt from distance check
+   Before:
+       dist = math.sqrt((self.x - point.x)**2 + (self.y - point.y)**2)
+       return dist <= self.radius
+   After:
+       dx = self.x - point.x
+       dy = self.y - point.y
+       return dx * dx + dy * dy <= self.radius * self.radius
+
+   Why: math.sqrt is expensive. Since we only need to compare the distance
+   against a threshold, we can compare squared distances instead and avoid
+   the sqrt entirely. This function is called for every point in every leaf
+   node that overlaps the query circle — across all boids per frame, that
+   amounts to O(n^2) sqrt calls eliminated.
+
+2. Rectangle.intersects(Circle) — Replace 4x distToLine with AABB closest-point test
+   Before:
+       if self.containsPt(cx, cy): return True
+       if (Point.distToLine(...) <= cr or   # left edge
+           Point.distToLine(...) <= cr or   # right edge
+           Point.distToLine(...) <= cr or   # top edge
+           Point.distToLine(...) <= cr):    # bottom edge
+           return True
+       return False
+   After:
+       closest_x = max(l0, min(cx, r0))
+       closest_y = max(t0, min(cy, b0))
+       dx = cx - closest_x
+       dy = cy - closest_y
+       return dx * dx + dy * dy <= cr * cr
+
+   Why: The original code ran up to 4 calls to distToLine, each computing a
+   sqrt. The correct and cheaper approach is to find the closest point on the
+   rectangle to the circle centre by clamping, then do a single squared-distance
+   check. No sqrt needed. This also correctly handles the case where the circle
+   centre is inside the rectangle (closest point IS the centre, distance = 0).
+   This intersection test is called O(n log n) times per frame during tree
+   traversal, so reducing it from 4 sqrts to 0 is a meaningful saving.
+
+----------------------------------------
+FILE: quad_tree.py
+----------------------------------------
+
+3. Node.__init__ — Fix mutable default argument (correctness bug)
+   Before:
+       def __init__(self, rectBoundary, points=[]):
+           self.points = points
+   After:
+       def __init__(self, rectBoundary, points=None):
+           self.points = points if points is not None else []
+
+   Why: In Python, a mutable default argument (points=[]) is created once at
+   class definition time and shared across all calls that don't supply the
+   argument. Every Node() constructed without an explicit points list was
+   referencing the same list object. Mutating it (via .append) on one node
+   would corrupt all others. The fix uses None as the sentinel and creates a
+   fresh list per instance.
+
+4. recursiveInsert — Only subdivide when capacity is actually exceeded
+   Before:
+       if (not node.isSubdivided) and (len(node.points) <= capacity):
+           node.points.append(point)
+           recursiveSubdivide(node, capacity)   # called on EVERY insert
+           return True
+   After:
+       node.points.append(point)
+       if len(node.points) > capacity:          # only called when needed
+           recursiveSubdivide(node, capacity, currHeight)
+       return True
+
+   Why: The original code called recursiveSubdivide after every single append,
+   even when the node had plenty of room. recursiveSubdivide would return
+   immediately in those cases (wasted call), but the overhead adds up. Now
+   subdivision only happens when the capacity is actually exceeded.
+
+   Additionally, the children loop was changed to return True immediately
+   on the first successful child insert, rather than trying all siblings.
+
+5. recursiveSubdivide — Add depth limit to prevent infinite recursion
+   Before:
+       def recursiveSubdivide(node, capacity):
+           if len(node.points) <= capacity:
+               return
+           ...
+           recursiveSubdivide(topLeft, capacity)   # no depth bound
+   After:
+       def recursiveSubdivide(node, capacity, currHeight):
+           if len(node.points) <= capacity or currHeight == 0:
+               return
+           ...
+           recursiveSubdivide(topLeft, capacity, currHeight - 1)
+
+   Why: Without a depth bound, coincident points (boids at the exact same
+   position, which happens naturally in this simulation) always fall into the
+   same child quadrant. The child always exceeds capacity, which triggers
+   another subdivision, and so on forever — producing a RecursionError. The
+   currHeight parameter threads the tree's maxheight limit down into
+   recursiveSubdivide so recursion is capped regardless of point distribution.
+
+6. recursiveQuery — Remove redundant double intersection check
+   Before:
+       elif node.isSubdivided:
+           for child in node.children:
+               if child.rectBoundary.intersects(range):  # checked here
+                   recursiveQuery(child, dataList, range)  # and again at top of call
+   After:
+       if node.isSubdivided:
+           for child in node.children:
+               recursiveQuery(child, dataList, range)  # check happens once inside
+
+   Why: recursiveQuery already starts by checking if the node's boundary
+   intersects the range and returning early if not. Checking it again in the
+   parent's loop before the recursive call was redundant — each intersection
+   test was being done twice. Removing the guard in the loop halves the number
+   of intersection tests at internal nodes.
+
+7. iterativeQuery — Replace queue.LifoQueue with a plain list stack
+   Before:
+       stack = queue.LifoQueue()
+       stack.put(root)
+       while not stack.empty():
+           node = stack.get()
+           ...
+           stack.put(child)
+   After:
+       stack = [root]
+       while stack:
+           node = stack.pop()
+           ...
+           stack.extend(node.children)
+
+   Why: queue.LifoQueue is a thread-safe data structure that uses locks on
+   every put/get. This simulation is single-threaded — the locking overhead
+   is pure waste. A plain Python list used as a stack (.append/.pop) is
+   significantly faster for this use case. Also removed the import of the
+   queue module since it's no longer used.
+
+----------------------------------------
+FILE: flock.py
+----------------------------------------
+
+8. inNeighboorhood — Exclude self from quad-tree results
+   Before:
+       neighbors.extend(self.quadtree.query(circleRange))
+   After:
+       neighbors.extend(b for b in self.quadtree.query(circleRange) if b is not myBoid)
+
+   Why: The brute-force path already excluded the querying boid itself with
+   `boid is not myBoid`. The quad-tree path did not — a boid was always within
+   its own neighbour radius, so it always included itself in the results. This
+   caused incorrect flocking behaviour when using the quad-tree.
+
+9. draw — Remove redundant Boid type filter
+   Before:
+       boidNeighbors = [a for a in neighbors if type(a) == Boid]
+       # ... then use boidNeighbors in cohesion/separation/alignment
+   After:
+       # neighbors used directly — no filter
+
+   Why: The neighbors list already contains only Boid objects (inserted as
+   such via insertPts). The filter was an O(n) pass per boid (O(n^2) total)
+   that never removed anything.
+
+10. draw — Remove second per-frame quad-tree rebuild
+    Before:
+        if showQtree:
+            self.quadtree.reset()
+            self.quadtree.insertPts(self.flock)  # second full rebuild
+            self.quadtree.drawBoundaries()
+    After:
+        if showQtree:
+            self.quadtree.drawBoundaries()  # reuse the tree built at frame start
+
+    Why: The tree was being rebuilt twice every frame when showQtree was True:
+    once at the top of draw() for querying, and again after all boids updated,
+    just to draw the boundaries. The second rebuild costs a full O(n log n)
+    insert pass for purely visual output. The tree built at the start of the
+    frame is still valid for drawing — the boundaries shown will be one frame
+    behind the boid positions, which is imperceptible at normal frame rates.
+
+========================================
+VERIFICATION
+========================================
+
+Two automated checks were run after the fixes:
+
+1. Coincident points test: 50 boids inserted at the exact same (x, y) position.
+   Both recursive and iterative query paths returned all 50 without a
+   RecursionError.
+
+2. Correctness test: 2000 random points inserted into the quad-tree.
+   200 random circle queries were run and compared against a brute-force scan.
+   Result: 0 mismatches out of 200 queries.

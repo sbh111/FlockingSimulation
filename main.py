@@ -20,14 +20,14 @@ import sys
 
 def main():
     pygame.init()
-    display = pygame.display.set_mode((600, 600))
+    display = pygame.display.set_mode((1200, 600))
     random.seed(time.time())
 
-    flock = Flock(60)
+    flock = Flock(250)
     clock = pygame.time.Clock()
 
     useTree = True
-    showTree = True
+    showTree = False
     useCohesion = True
     useSeperation = True
     useAlignment = True

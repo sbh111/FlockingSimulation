@@ -167,7 +167,7 @@ class Flock:
 
             acc += (1 * self.avoidMouse(boid))
 
-            #if Boid has no neighbirs, it will just wander randomly
+            #if Boid has no neighbors, it will just wander randomly
             if acc == m.Vector2(0, 0):
                 acc += (.3 * m.Vector2(random.uniform(-2, 2), random.uniform(-2, 2)))
 
