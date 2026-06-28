@@ -1,5 +1,8 @@
 .idea/
 
+# Claude Code local settings
+.claude/
+
 # dotenv
 .env
 
