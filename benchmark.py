@@ -59,31 +59,44 @@ def time_object_flock(n, frames, warmup):
 
 
 def time_array_flock(n, frames, warmup, xp):
-    """Per-frame time for the vectorized flock on backend `xp`."""
+    """Per-frame time for the vectorized flock on backend `xp`. Returns ms/frame,
+    or None if the GPU ran out of memory (the dense N*N matrices can exceed a
+    small card's VRAM)."""
     from flock_array import FlockArray
 
-    flock = FlockArray(n, WIDTH, HEIGHT, seed=SEED, xp=xp)
+    on_gpu = xp is not np
 
     def sync():
         # CuPy is async; force completion so timings are real.
-        if xp is not np:
+        if on_gpu:
             xp.cuda.runtime.deviceSynchronize()
 
-    for _ in range(warmup):
-        flock.step(mouse_pos=MOUSE)
-    sync()
-    t0 = time.perf_counter()
-    for _ in range(frames):
-        flock.step(mouse_pos=MOUSE)
-    sync()
-    elapsed = time.perf_counter() - t0
-    return elapsed / frames
+    try:
+        flock = FlockArray(n, WIDTH, HEIGHT, seed=SEED, xp=xp)
+        for _ in range(warmup):
+            flock.step(mouse_pos=MOUSE)
+        sync()
+        t0 = time.perf_counter()
+        for _ in range(frames):
+            flock.step(mouse_pos=MOUSE)
+        sync()
+        elapsed = time.perf_counter() - t0
+        return (elapsed / frames) * 1000
+    except Exception as e:
+        if on_gpu and type(e).__name__ == "OutOfMemoryError":
+            return None
+        raise
+    finally:
+        if on_gpu:
+            # Release pooled device memory so the next (larger) size starts clean.
+            xp.get_default_memory_pool().free_all_blocks()
 
 
 def get_backend(use_gpu):
     if not use_gpu:
         return np, "NumPy (CPU)"
     try:
+        import cuda_setup  # register nvidia-*-cu11 wheel DLL dirs before cupy loads
         import cupy as cp
         cp.cuda.runtime.getDeviceProperties(0)
         # touch the device to confirm it actually works
@@ -121,7 +134,11 @@ def main():
 
     for n in args.sizes:
         obj_ms = time_object_flock(n, args.frames, args.warmup) * 1000
-        arr_ms = time_array_flock(n, args.frames, args.warmup, xp) * 1000
+        arr_ms = time_array_flock(n, args.frames, args.warmup, xp)
+        if arr_ms is None:
+            print("{:>8}  {:>14.3f}  {:>14}  {:>10}".format(
+                n, obj_ms, "OOM", "-"))
+            continue
         speedup = obj_ms / arr_ms if arr_ms > 0 else float("inf")
         print("{:>8}  {:>14.3f}  {:>14.3f}  {:>9.2f}x".format(
             n, obj_ms, arr_ms, speedup))

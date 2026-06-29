@@ -33,6 +33,13 @@ mirror boid.py and flock.py so behavior matches the original.
 import numpy as np
 
 
+# Separation weight is inversely proportional to the flock size: the per-frame
+# weight is SEPARATION_K / N. Calibrated to equal the previous fixed 1.1 at the
+# default 350-boid flock (1.1 * 350 = 385). Matches flock.py's SEPARATION_K so
+# the two backends behave identically.
+SEPARATION_K = 385.0
+
+
 class FlockArray:
     def __init__(self, n, width, height, seed=None, xp=np, dtype=None):
         self.xp = xp
@@ -54,7 +61,7 @@ class FlockArray:
         obj.dtype = dtype if dtype is not None else xp.float32
         dt = obj.dtype
         obj.n = len(boids)
-        obj._rng = xp.random.default_rng()
+        obj._rng = np.random.default_rng()  # host RNG (see _init_state)
 
         if obj.n == 0:
             obj.pos = xp.zeros((0, 2), dtype=dt)
@@ -109,7 +116,11 @@ class FlockArray:
     def _init_state(self, n, seed):
         xp = self.xp
         dt = self.dtype
-        rng = xp.random.default_rng(seed)
+        # The one-time random init is done on the host with NumPy and then moved
+        # to the device. This sidesteps API differences between numpy.random and
+        # cupy.random (e.g. CuPy's Generator lacks .normal) and makes the initial
+        # flock identical across the CPU and GPU backends.
+        rng = np.random.default_rng(seed)
 
         self.n = int(n)
 
@@ -117,28 +128,28 @@ class FlockArray:
         # matching Flock.insertBoid / Boid.__init__.
         px = rng.uniform(0, self.w, self.n)
         py = rng.uniform(0, self.h, self.n)
-        self.pos = xp.stack([px, py], axis=1).astype(dt)
+        self.pos = xp.asarray(np.stack([px, py], axis=1), dtype=dt)
 
         vx = rng.uniform(-10, 10, self.n)
         vy = rng.uniform(-10, 10, self.n)
-        self.vel = xp.stack([vx, vy], axis=1).astype(dt)
+        self.vel = xp.asarray(np.stack([vx, vy], axis=1), dtype=dt)
 
         # Per-boid line thickness s in {1,2,3,4} (int of uniform[1,5)).
-        s = rng.uniform(1, 5, self.n).astype(xp.int32)
-        self.size = s
+        s = rng.uniform(1, 5, self.n).astype(np.int32)
+        self.size = xp.asarray(s)
 
         # neighborRadius = max(s*10, int(gauss(30, 20))), matching Boid.__init__.
-        r = rng.normal(30, 20, self.n).astype(xp.int32)
-        radius = xp.maximum(s * 10, r).astype(dt)
-        self.radius = radius
-        self.radius2 = (radius * radius).astype(dt)
+        r = rng.normal(30, 20, self.n).astype(np.int32)
+        radius = np.maximum(s * 10, r).astype(np.float32)
+        self.radius = xp.asarray(radius, dtype=dt)
+        self.radius2 = (self.radius * self.radius).astype(dt)
 
         # maxSpeed = abs(gauss(20, 5)).
-        self.max_speed = xp.abs(rng.normal(20, 5, self.n)).astype(dt)
+        self.max_speed = xp.asarray(np.abs(rng.normal(20, 5, self.n)), dtype=dt)
 
-        self.color = rng.integers(0, 256, size=(self.n, 3)).astype(xp.int32)
+        self.color = xp.asarray(rng.integers(0, 256, size=(self.n, 3)).astype(np.int32))
 
-        # A reusable RNG for the per-frame "wander" jitter.
+        # A reusable host RNG for the per-frame "wander" jitter and add_boid.
         self._rng = rng
 
     def add_boid(self, x, y):
@@ -161,8 +172,8 @@ class FlockArray:
         self.radius2 = (self.radius * self.radius).astype(dt)
         self.max_speed = xp.concatenate(
             [self.max_speed, xp.asarray([abs(rng.normal(20, 5))], dtype=dt)])
-        self.color = xp.concatenate(
-            [self.color, rng.integers(0, 256, size=(1, 3)).astype(xp.int32)], axis=0)
+        rgb = xp.asarray(rng.integers(0, 256, size=(1, 3)).astype(np.int32))
+        self.color = xp.concatenate([self.color, rgb], axis=0)
         self.n += 1
 
     def remove_boid(self):
@@ -222,14 +233,16 @@ class FlockArray:
             acc = acc + 0.5 * (mean_vel - V)
 
         if useSeparation:
-            # 1.1 * sum_j (P[i] - P[j]) / dist2.  Original normalizes then scales by
-            # 1/dist, i.e. v/|v| * 1/|v| = v/|v|^2; coincident pairs (dist2==0)
-            # contribute nothing.
+            # (SEPARATION_K / N) * sum_j (P[i] - P[j]) / dist2.  Original
+            # normalizes then scales by 1/dist, i.e. v/|v| * 1/|v| = v/|v|^2;
+            # coincident pairs (dist2==0) contribute nothing. The weight scales
+            # inversely with the total flock size N.
             safe_d2 = xp.where(dist2 > 0, dist2, 1.0)
             inv = xp.where(neighbor & (dist2 > 0), 1.0 / safe_d2, 0.0).astype(dt)
             sep_x = (inv * dx).sum(axis=1)
             sep_y = (inv * dy).sum(axis=1)
-            acc = acc + 1.1 * xp.stack([sep_x, sep_y], axis=1)
+            sep_factor = SEPARATION_K / n
+            acc = acc + sep_factor * xp.stack([sep_x, sep_y], axis=1)
 
         # Boids with no neighbors get zero rule-acceleration (original returns 0).
         acc = acc * has_n[:, None]
@@ -242,7 +255,7 @@ class FlockArray:
         zero = (acc[:, 0] == 0) & (acc[:, 1] == 0)
         if bool(zero.any()):
             k = int(zero.sum())
-            jitter = self._rng.uniform(-2, 2, size=(k, 2)).astype(dt)
+            jitter = xp.asarray(self._rng.uniform(-2, 2, size=(k, 2)), dtype=dt)
             acc[zero] = acc[zero] + 0.3 * jitter
 
         # Integrate: v += a; clamp speed; p += v; wrap.

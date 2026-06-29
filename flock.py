@@ -13,6 +13,14 @@ from quad_tree import *
 from profileCode import profile
 
 
+# Separation weight is inversely proportional to the flock size: the per-frame
+# weight is SEPARATION_K / (number of boids). SEPARATION_K is calibrated so the
+# weight equals the previous fixed 1.1 at the default 350-boid flock
+# (1.1 * 350 = 385), so behaviour is unchanged at startup and only weakens as
+# the flock grows (and strengthens as it shrinks).
+SEPARATION_K = 385.0
+
+
 class Flock:
     def __init__(self, popSize, w=0, h=0):
         self.flock = []
@@ -94,7 +102,9 @@ class Flock:
         if useCohesion:
             acc += .004 * ((sumPos / n) - boid.pos)
         if useSeperation:
-            acc += 1.1 * sepAcc
+            #separation weight scales inversely with the total flock size
+            sepFactor = SEPARATION_K / len(self.flock)
+            acc += sepFactor * sepAcc
         if useAlignment:
             acc += .5 * ((sumVel / n) - boid.velocity)
         return acc

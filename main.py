@@ -15,16 +15,48 @@ one of my favorite algorithms.
 import pygame
 import random
 import time
+import argparse
 from flock import Flock
 from flock_array import FlockArray
 import sys
 
+
+def resolve_array_backend(use_gpu):
+    """Return (xp_module, label) for the vectorized array flock. With --gpu this
+    is CuPy (CUDA); it falls back to NumPy with a message if the GPU is
+    unavailable."""
+    import numpy as np
+    if not use_gpu:
+        return np, "NumPy(CPU)"
+    try:
+        import cuda_setup  # register CUDA DLL dirs before importing cupy
+        import cupy as cp
+        cp.cuda.runtime.getDeviceProperties(0)
+        _ = (cp.arange(8) * 2).sum()       # touch the device to confirm it works
+        cp.cuda.runtime.deviceSynchronize()
+        name = cp.cuda.runtime.getDeviceProperties(0)["name"].decode()
+        return cp, "CuPy(GPU: {})".format(name)
+    except Exception as e:
+        print("\n[!] GPU unavailable ({}: {}); using NumPy instead.".format(
+            type(e).__name__, str(e).splitlines()[0]))
+        return np, "NumPy(CPU, GPU fallback)"
+
+
 def main():
+    ap = argparse.ArgumentParser(description="Boids flocking simulation")
+    ap.add_argument("--gpu", action="store_true",
+                    help="use the CuPy/CUDA backend for the vectorized array flock")
+    ap.add_argument("--boids", type=int, default=350,
+                    help="initial number of boids (default 350)")
+    args = ap.parse_args()
+
     pygame.init()
     display = pygame.display.set_mode((1200, 800))
     random.seed(time.time())
 
-    flock = Flock(350)
+    array_xp, array_label = resolve_array_backend(args.gpu)
+
+    flock = Flock(args.boids)
     arrayFlock = None          # vectorized backend, created lazily on first toggle
     useArray = False           # False -> object/quad-tree backend; True -> array backend
     clock = pygame.time.Clock()
@@ -42,9 +74,10 @@ def main():
     Press 3 to toggle Cohesion between Boids.
     Press 4 to toggle Separation between Boids.
     Press 5 to toggle Alignment between Boids.
-    Press 6 to toggle the vectorized (NumPy) backend.
+    Press 6 to toggle the vectorized backend.
     """
     print(instructions)
+    print("    Vectorized backend: {}\n".format(array_label))
 
 
     while True:
@@ -85,7 +118,7 @@ def main():
                     w, h = pygame.display.get_surface().get_size()
                     if not useArray:
                         #entering array mode: seed it from the current object flock
-                        arrayFlock = FlockArray.from_boids(flock.flock, w, h)
+                        arrayFlock = FlockArray.from_boids(flock.flock, w, h, xp=array_xp)
                     else:
                         #leaving array mode: write the array state back to the flock
                         arrayFlock.write_to_flock(flock)
@@ -98,7 +131,7 @@ def main():
 
 
         flockLen = arrayFlock.n if useArray else len(flock.flock)
-        backend = "Array(NumPy)" if useArray else "Object/Qtree"
+        backend = ("Array-" + array_label) if useArray else "Object/Qtree"
         pygame.display.set_caption(
             "Boids Simulation - Boids: {0} - FPS: {1} - Backend: {2}".format(
                 flockLen, int(fps), backend))
