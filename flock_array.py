@@ -42,6 +42,69 @@ class FlockArray:
 
         self._init_state(n, seed)
 
+    @classmethod
+    def from_boids(cls, boids, width, height, xp=np, dtype=None):
+        """Build a flock from existing Boid objects (flock.py), copying every
+        per-boid attribute so the array backend continues the *same* flock rather
+        than a fresh random one. Used when toggling backends at runtime."""
+        obj = cls.__new__(cls)
+        obj.xp = xp
+        obj.w = float(width)
+        obj.h = float(height)
+        obj.dtype = dtype if dtype is not None else xp.float32
+        dt = obj.dtype
+        obj.n = len(boids)
+        obj._rng = xp.random.default_rng()
+
+        if obj.n == 0:
+            obj.pos = xp.zeros((0, 2), dtype=dt)
+            obj.vel = xp.zeros((0, 2), dtype=dt)
+            obj.size = xp.zeros((0,), dtype=xp.int32)
+            obj.radius = xp.zeros((0,), dtype=dt)
+            obj.radius2 = xp.zeros((0,), dtype=dt)
+            obj.max_speed = xp.zeros((0,), dtype=dt)
+            obj.color = xp.zeros((0, 3), dtype=xp.int32)
+            return obj
+
+        obj.pos = xp.asarray([[b.pos.x, b.pos.y] for b in boids], dtype=dt)
+        obj.vel = xp.asarray([[b.velocity.x, b.velocity.y] for b in boids], dtype=dt)
+        obj.size = xp.asarray([b.s for b in boids], dtype=xp.int32)
+        radius = xp.asarray([b.neighborRadius for b in boids], dtype=dt)
+        obj.radius = radius
+        obj.radius2 = (radius * radius).astype(dt)
+        obj.max_speed = xp.asarray([b.maxSpeed for b in boids], dtype=dt)
+        obj.color = xp.asarray([list(b.color) for b in boids], dtype=xp.int32)
+        return obj
+
+    def write_to_flock(self, flock):
+        """Replace `flock.flock` with Boid objects rebuilt from this array's
+        state, so switching back to the object backend continues the same flock.
+        Handles boids added/removed while in array mode."""
+        import pygame.math as m
+        from boid import Boid
+
+        P = self.positions_host()
+        V = self.vel if self.xp is np else self.xp.asnumpy(self.vel)
+        size = self.size if self.xp is np else self.xp.asnumpy(self.size)
+        radius = self.radius if self.xp is np else self.xp.asnumpy(self.radius)
+        max_speed = self.max_speed if self.xp is np else self.xp.asnumpy(self.max_speed)
+        color = self.color if self.xp is np else self.xp.asnumpy(self.color)
+
+        boids = []
+        for i in range(self.n):
+            b = Boid(m.Vector2(float(P[i, 0]), float(P[i, 1])),
+                     m.Vector2(float(V[i, 0]), float(V[i, 1])))
+            b.s = int(size[i])
+            b.maxSpeed = float(max_speed[i])
+            b.neighborRadius = float(radius[i])
+            b.color = (int(color[i, 0]), int(color[i, 1]), int(color[i, 2]))
+            # keep the boid's query Circle consistent with the copied attributes
+            b.circle.x = b.x
+            b.circle.y = b.y
+            b.circle.radius = b.neighborRadius
+            boids.append(b)
+        flock.flock = boids
+
     # ------------------------------------------------------------------ setup
     def _init_state(self, n, seed):
         xp = self.xp
@@ -120,6 +183,8 @@ class FlockArray:
     def step(self, mouse_pos=None, useCohesion=True, useSeparation=True,
              useAlignment=True):
         """Advance the whole flock by one frame. Pure array math, no rendering."""
+        if self.n == 0:
+            return
         xp = self.xp
         dt = self.dtype
         P = self.pos

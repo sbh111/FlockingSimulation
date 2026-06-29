@@ -21,7 +21,7 @@ import sys
 
 def main():
     pygame.init()
-    display = pygame.display.set_mode((1200, 600))
+    display = pygame.display.set_mode((1200, 800))
     random.seed(time.time())
 
     flock = Flock(350)
@@ -80,11 +80,16 @@ def main():
                     #toggle Alignment
                     useAlignment = not useAlignment
                 if event.key == pygame.K_6:
-                    #toggle the vectorized (NumPy) backend
+                    #toggle the vectorized (NumPy) backend, syncing the flock
+                    #state across so both backends show the same set of boids
+                    w, h = pygame.display.get_surface().get_size()
+                    if not useArray:
+                        #entering array mode: seed it from the current object flock
+                        arrayFlock = FlockArray.from_boids(flock.flock, w, h)
+                    else:
+                        #leaving array mode: write the array state back to the flock
+                        arrayFlock.write_to_flock(flock)
                     useArray = not useArray
-                    if useArray and arrayFlock is None:
-                        w, h = pygame.display.get_surface().get_size()
-                        arrayFlock = FlockArray(len(flock.flock), w, h)
                 if event.key == pygame.K_BACKSPACE:
                     if useArray:
                         arrayFlock.remove_boid()
