@@ -333,3 +333,136 @@ VERIFICATION (SECOND PASS)
 3. insertPts dispatch: verified tuple, Point, and object-with-x/y inputs all
    insert correctly, and a Point's .data is preserved (previously-dead branch
    now reachable).
+
+
+========================================
+THIRD PASS - GPU-READY VECTORIZED BACKEND (Phase 0 + 1)
+========================================
+
+Branch: improve-more-perf
+Date: 2026-06-28
+Commit: a1f1864
+
+Goal: lay the groundwork for offloading the flocking computation to the GPU
+(via CuPy / CUDA). Rather than jump straight to CuPy, the work was structured
+so the valuable refactor lands on CPU first and the GPU becomes a drop-in swap.
+
+Assessment that shaped the approach:
+  - At the current scale (~350 boids) the bottleneck is Python per-object
+    overhead, not raw math. A GPU would actually be SLOWER here because of
+    kernel-launch + host<->device transfer overhead; the crossover where a GPU
+    wins is in the thousands-to-tens-of-thousands of boids.
+  - The object + quad-tree design is the opposite of what a GPU wants. GPUs
+    want Structure-of-Arrays (contiguous pos/vel/... arrays) and a parallel
+    brute-force N*N neighbour search; a quad-tree is serial pointer-chasing
+    that does not vectorize. The GPU path therefore discards the quad-tree.
+  - CuPy mirrors the NumPy API, so writing the physics against a module handle
+    `xp` lets the SAME code run on NumPy (CPU) now and CuPy (GPU) later.
+  - Environment finding: CuPy 14.1.1 imports but cannot reach the device --
+    `cudaErrorInsufficientDriver`. The NVIDIA driver (~451.67) is too old for
+    CuPy 14's CUDA 12 runtime. The GPU is a modest older mobile chip (paired
+    with Intel HD 520). Phase 2 (GPU) is blocked until the driver is updated or
+    a CUDA-11-matched CuPy (cupy-cuda11x) is installed.
+
+----------------------------------------
+NEW FILE: flock_array.py
+----------------------------------------
+
+18. Vectorized Structure-of-Arrays flock
+    The whole flock lives in arrays (pos, vel, radius, radius2, max_speed,
+    size, color). One step() advances every boid at once using array math over
+    an N*N pairwise-distance matrix:
+      - neighbour[i,j] = dist2 <= radius_i^2 and i != j (per-row radius, so the
+        original asymmetric "my radius" semantics are preserved).
+      - cohesion:   0.004 * (mean(neighbour positions) - own position)
+      - alignment:  0.5   * (mean(neighbour velocities) - own velocity)
+      - separation: 1.1   * sum_j (p_i - p_j) / dist2  (coincident pairs add 0)
+      - boids with no neighbours get zero rule-acceleration; a boid whose total
+        acceleration is exactly zero gets the same small random "wander" nudge
+        as the original.
+    Then integrate: v += a; clamp |v| to max_speed; p += v; wrap at edges.
+    All rule weights and the per-boid radius/max_speed/size distributions mirror
+    boid.py / flock.py so behaviour matches the object path.
+
+    Written against an `xp` module handle (numpy now, cupy later) at float32.
+    Includes add_boid / remove_boid for interactive parity and an optional
+    pygame draw() (a per-boid Python loop -- deliberately the Amdahl ceiling,
+    not the thing being optimized).
+
+    Intentional semantic difference: the update is Jacobi (all boids read the
+    previous frame's state) vs the object path's in-place Gauss-Seidel (later
+    boids see earlier boids' already-updated positions). Jacobi is
+    order-independent and the natural fit for vectorized / GPU execution; the
+    emergent flocking is equivalent.
+
+----------------------------------------
+NEW FILE: benchmark.py
+----------------------------------------
+
+19. Headless benchmark harness
+    Runs the simulation with rendering disabled (SDL dummy driver, fixed seed)
+    and reports ms/frame for the object/quad-tree flock vs the array flock
+    across a range of N, plus the speedup. A --gpu flag swaps the array backend
+    to CuPy and falls back to NumPy with a warning if the GPU is unavailable.
+    The object path is isolated to physics by monkeypatching Boid.draw to a
+    no-op for the duration of the measurement.
+
+----------------------------------------
+FILE: main.py
+----------------------------------------
+
+20. Runtime toggle for the vectorized backend
+    Press 6 to switch between the object/quad-tree backend (default) and the
+    array backend at runtime. The array flock is created lazily on first toggle,
+    seeded with the current boid count. Mouse-add, Backspace-remove, and the
+    3/4/5 rule toggles all route to whichever backend is active; the caption and
+    console line show the live backend.
+
+21. Fix separation toggle (correctness bug)
+    The `4` key toggled a misspelled `useSeperation` variable that was separate
+    from the `useSeparation` the simulation actually reads, so toggling
+    separation was a no-op (and risked a NameError). Corrected to `useSeparation`
+    throughout.
+
+----------------------------------------
+FILE: boid.py
+----------------------------------------
+
+22. maxSpeed tuning: gauss(12,3) -> gauss(20,5)
+    Pre-existing tuning on this branch; the array backend mirrors gauss(20,5)
+    so the two backends stay consistent.
+
+----------------------------------------
+FILE: requirements.txt
+----------------------------------------
+
+23. Added numpy (now a hard dependency); noted optional cupy-cuda1x for the
+    GPU backend. Rewritten from UTF-16 to clean UTF-8.
+
+========================================
+RESULTS / VERIFICATION (THIRD PASS)
+========================================
+
+CPU benchmark (headless, physics only, NumPy backend, 40 frames):
+
+       N     quadtree ms        array ms     speedup
+     350          28.222           5.638       5.01x
+    1000          93.995          39.416       2.38x
+    2000         227.170         141.467       1.61x
+    3000         379.897         353.866       1.07x
+
+Interpretation: the array backend wins decisively at the current operating size
+(5x at N=350) where Python object overhead dominates. The speedup decays with N
+because the dense O(N^2) matrix crosses over with the quad-tree's O(N log N)
+near N~3000 on CPU. That crossover is exactly the case for the GPU (parallelize
+the O(N^2)) and motivates a future spatial-hash grid (Phase 3) for either
+backend.
+
+Correctness (300 steps, 350 boids): positions/velocities all finite, positions
+stay in-bounds, 0 speed-clamp violations, mean ~5 neighbours (flocking is
+genuinely happening). Integration path (step -> draw -> add_boid/remove_boid)
+verified headlessly under the SDL dummy driver.
+
+Status: Phase 0 (benchmark) + Phase 1 (vectorized CPU backend) complete.
+Phase 2 (CuPy swap) is ready in code but blocked on the NVIDIA driver / CuPy
+CUDA-runtime mismatch described above.
