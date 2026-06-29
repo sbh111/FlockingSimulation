@@ -466,3 +466,101 @@ verified headlessly under the SDL dummy driver.
 Status: Phase 0 (benchmark) + Phase 1 (vectorized CPU backend) complete.
 Phase 2 (CuPy swap) is ready in code but blocked on the NVIDIA driver / CuPy
 CUDA-runtime mismatch described above.
+
+
+========================================
+FOURTH PASS - BACKEND STATE SYNC, GPU ENABLEMENT (Phase 2), SEPARATION TUNING
+========================================
+
+Branch: attempt-cuda
+Date: 2026-06-28
+Commits: 8cc7a82 (backend sync), aeb42a7 (GPU + separation)
+
+----------------------------------------
+A. SHARED FLOCK STATE BETWEEN BACKENDS  (commit 8cc7a82)
+----------------------------------------
+
+Problem: toggling between the object/quad-tree backend and the array backend
+(key 6) showed two independent simulations with different random boids. Now the
+toggle carries the SAME flock across in both directions.
+
+24. flock_array.py: FlockArray.from_boids(boids, w, h, xp) classmethod
+    Builds the array flock from existing Boid objects, copying every per-boid
+    attribute (pos, vel, size, neighborRadius, maxSpeed, color) exactly. Used
+    when entering array mode so it continues the current flock rather than a
+    fresh random one. Verified bit-exact on entry.
+
+25. flock_array.py: write_to_flock(flock)
+    Rebuilds flock.flock from the array state when leaving array mode, so the
+    object backend resumes the same boids. Handles boids added/removed while in
+    array mode (counts stay in sync). step() also early-returns when n == 0 so
+    the flock can be emptied without error.
+
+26. main.py: key 6 now syncs state across the toggle (from_boids on entry,
+    write_to_flock on exit) instead of creating an independent random flock.
+
+----------------------------------------
+B. GPU / CUDA ENABLEMENT  (Phase 2, commit aeb42a7)
+----------------------------------------
+
+The Phase 2 blocker (driver/runtime mismatch) was resolved. The driver had been
+updated to 522.06 (CUDA 11.8). The remaining problem was the installed CuPy:
+cupy-cuda13x bundles a CUDA 13 runtime that a CUDA-11.8 driver cannot run, and
+CUDA 13 dropped support for this GPU's architecture entirely. Fix:
+
+  - Swapped cupy-cuda13x -> cupy-cuda11x (CuPy 13.6), matching the driver.
+  - cupy-cuda11x does not bundle the CUDA libraries and there is no system CUDA
+    Toolkit, so installed the nvidia-*-cu11 library wheels (nvrtc, cuda-runtime,
+    cublas, curand, cusparse, cusolver, cufft).
+  - Those wheels scatter DLLs across site-packages/nvidia/<lib>/bin, which
+    cupy-cuda11x does not auto-register on Windows.
+
+GPU: NVIDIA GeForce (Maxwell, compute capability 5.0, ~1 GB VRAM).
+
+27. NEW FILE cuda_setup.py
+    On import (Windows only), registers each site-packages/nvidia/<lib>/bin dir
+    with os.add_dll_directory so CuPy can resolve nvrtc64_112_0.dll etc. No-op on
+    non-Windows or when the nvidia wheels aren't installed. Import BEFORE cupy.
+
+28. flock_array.py: host-side random init
+    The one-time random init (_init_state, add_boid, the per-frame wander jitter,
+    from_boids) now uses a NumPy host RNG and moves results to the device via
+    xp.asarray. This sidesteps numpy.random vs cupy.random API differences (CuPy
+    Generator lacks .normal) and makes the initial flock identical on CPU and GPU.
+
+29. main.py: --gpu and --boids N flags
+    --gpu selects the CuPy backend for the array flock (resolve_array_backend),
+    falling back to NumPy with a message if the GPU is unavailable. --boids sets
+    the initial flock size. The caption/console label shows the active backend.
+    Run: python main.py --gpu --boids 3000, then press 6.
+
+30. benchmark.py: import cuda_setup before cupy; catch GPU OutOfMemoryError and
+    report "OOM" instead of crashing; free the device memory pool between sizes.
+
+GPU benchmark (headless, physics only):
+       N     quadtree ms        array(GPU) ms     speedup
+     350         114              24               4.8x
+    1000         261              15              17x
+    2000         349              29              12x
+    4000         848              90               9.4x
+    6000        1406             OOM                -
+    8000        1993             OOM                -
+
+CPU<->GPU parity: identical init (diff 0.0); after 5 steps max position diff
+~1.2e-4 (float32 reduction-order), GPU output finite. The ~1 GB VRAM caps the
+dense N*N approach near N~5000 -- the main motivation for a Phase 3 GPU
+spatial-hash grid.
+
+----------------------------------------
+C. SEPARATION WEIGHT SCALES WITH FLOCK SIZE  (commit aeb42a7)
+----------------------------------------
+
+31. flock.py / flock_array.py: separation weight is now SEPARATION_K / N (total
+    flock size) instead of a fixed 1.1. SEPARATION_K = 385 is calibrated so the
+    weight equals the previous 1.1 at the default 350-boid flock; it weakens as
+    the flock grows (e.g. 0.385 at N=1000, 0.128 at N=3000) and strengthens as it
+    shrinks (7.7 at N=50). The same constant is defined in both backends so they
+    stay identical. "Number of boids" = total flock size, not neighbour count.
+
+Status: Phase 2 (GPU backend) complete and verified. Remaining: Phase 3 (GPU
+spatial-hash grid) to get past the ~1 GB VRAM / O(N^2) ceiling.
