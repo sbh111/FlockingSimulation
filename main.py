@@ -16,6 +16,7 @@ import pygame
 import random
 import time
 from flock import Flock
+from flock_array import FlockArray
 import sys
 
 def main():
@@ -23,13 +24,15 @@ def main():
     display = pygame.display.set_mode((1200, 600))
     random.seed(time.time())
 
-    flock = Flock(250)
+    flock = Flock(350)
+    arrayFlock = None          # vectorized backend, created lazily on first toggle
+    useArray = False           # False -> object/quad-tree backend; True -> array backend
     clock = pygame.time.Clock()
 
     useTree = True
     showTree = False
     useCohesion = True
-    useSeperation = True
+    useSeparation = True
     useAlignment = True
 
     instructions = """
@@ -37,8 +40,9 @@ def main():
     Press 1 to toggle use Quad-tree.
     Press 2 to toggle show Quad-tree.
     Press 3 to toggle Cohesion between Boids.
-    Press 4 to toggle Seperation between Boids.
+    Press 4 to toggle Separation between Boids.
     Press 5 to toggle Alignment between Boids.
+    Press 6 to toggle the vectorized (NumPy) backend.
     """
     print(instructions)
 
@@ -54,7 +58,11 @@ def main():
                 pygame.quit()
                 quit()
             if event.type == pygame.MOUSEBUTTONDOWN:
-                flock.insertBoid((pygame.mouse.get_pos()))
+                mx, my = pygame.mouse.get_pos()
+                if useArray:
+                    arrayFlock.add_boid(mx, my)
+                else:
+                    flock.insertBoid((mx, my))
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_1:
                     #toggle using Quadtree
@@ -66,31 +74,50 @@ def main():
                     #toggle Cohesion
                     useCohesion = not useCohesion
                 if event.key == pygame.K_4:
-                    #toggle Seperation
-                    useSeperation = not useSeperation
+                    #toggle Separation
+                    useSeparation = not useSeparation
                 if event.key == pygame.K_5:
                     #toggle Alignment
                     useAlignment = not useAlignment
+                if event.key == pygame.K_6:
+                    #toggle the vectorized (NumPy) backend
+                    useArray = not useArray
+                    if useArray and arrayFlock is None:
+                        w, h = pygame.display.get_surface().get_size()
+                        arrayFlock = FlockArray(len(flock.flock), w, h)
                 if event.key == pygame.K_BACKSPACE:
-                    flock.removeBoid()
+                    if useArray:
+                        arrayFlock.remove_boid()
+                    else:
+                        flock.removeBoid()
 
 
-        flockLen = len(flock.flock)
-        pygame.display.set_caption("Boids Simulation - Boids: {0} - FPS: {1}".format(flockLen, int(fps)))
+        flockLen = arrayFlock.n if useArray else len(flock.flock)
+        backend = "Array(NumPy)" if useArray else "Object/Qtree"
+        pygame.display.set_caption(
+            "Boids Simulation - Boids: {0} - FPS: {1} - Backend: {2}".format(
+                flockLen, int(fps), backend))
 
         #very basic menu, will implement buttons later.
-        states = '\r    # of Boids: {0},' \
-                 ' Use Qtree: {1},' \
-                 ' Show Qtree: {2},' \
-                 ' Cohesion: {3},' \
-                 ' Seperation: {4},' \
-                 ' Alignment: {5}     '.\
-            format(flockLen, useTree, showTree, useCohesion, useSeperation, useAlignment)
+        states = '\r    Backend: {0},' \
+                 ' # of Boids: {1},' \
+                 ' Use Qtree: {2},' \
+                 ' Show Qtree: {3},' \
+                 ' Cohesion: {4},' \
+                 ' Separation: {5},' \
+                 ' Alignment: {6}     '.\
+            format(backend, flockLen, useTree, showTree, useCohesion, useSeparation, useAlignment)
 
         print(states, end="")
 
         display.fill((10, 10, 60))
-        flock.draw(useTree, showTree, useCohesion, useSeperation, useAlignment)
+        if useArray:
+            mouse = pygame.mouse.get_pos()
+            arrayFlock.step(mouse_pos=mouse, useCohesion=useCohesion,
+                            useSeparation=useSeparation, useAlignment=useAlignment)
+            arrayFlock.draw()
+        else:
+            flock.draw(useTree, showTree, useCohesion, useSeparation, useAlignment)
         pygame.display.flip()
 
 

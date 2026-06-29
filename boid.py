@@ -22,7 +22,7 @@ class Boid:
         r = int(random.gauss(30, 20))
         self.neighborRadius =  r if self.s * 10 < r else self.s * 10
         self.circle = Circle(self.x, self.y, self.neighborRadius)
-        self.maxSpeed = abs(random.gauss(12,3))
+        self.maxSpeed = abs(random.gauss(20,5))
         self.color = (
             random.randint(0, 255),
             random.randint(0, 255),
