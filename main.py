@@ -48,6 +48,8 @@ def main():
                     help="use the CuPy/CUDA backend for the vectorized array flock")
     ap.add_argument("--boids", type=int, default=350,
                     help="initial number of boids (default 350)")
+    ap.add_argument("--grid", action="store_true",
+                    help="use the spatial-hash grid neighbour search in the array backend")
     args = ap.parse_args()
 
     pygame.init()
@@ -59,6 +61,7 @@ def main():
     flock = Flock(args.boids)
     arrayFlock = None          # vectorized backend, created lazily on first toggle
     useArray = False           # False -> object/quad-tree backend; True -> array backend
+    useGrid = args.grid        # array backend neighbour search: grid vs brute-force
     clock = pygame.time.Clock()
 
     useTree = True
@@ -75,6 +78,7 @@ def main():
     Press 4 to toggle Separation between Boids.
     Press 5 to toggle Alignment between Boids.
     Press 6 to toggle the vectorized backend.
+    Press 7 to toggle grid vs brute-force neighbour search (array backend).
     """
     print(instructions)
     print("    Vectorized backend: {}\n".format(array_label))
@@ -118,11 +122,17 @@ def main():
                     w, h = pygame.display.get_surface().get_size()
                     if not useArray:
                         #entering array mode: seed it from the current object flock
-                        arrayFlock = FlockArray.from_boids(flock.flock, w, h, xp=array_xp)
+                        arrayFlock = FlockArray.from_boids(flock.flock, w, h,
+                                                           xp=array_xp, use_grid=useGrid)
                     else:
                         #leaving array mode: write the array state back to the flock
                         arrayFlock.write_to_flock(flock)
                     useArray = not useArray
+                if event.key == pygame.K_7:
+                    #toggle grid vs brute-force neighbour search (array backend)
+                    useGrid = not useGrid
+                    if arrayFlock is not None:
+                        arrayFlock.use_grid = useGrid
                 if event.key == pygame.K_BACKSPACE:
                     if useArray:
                         arrayFlock.remove_boid()
@@ -131,7 +141,10 @@ def main():
 
 
         flockLen = arrayFlock.n if useArray else len(flock.flock)
-        backend = ("Array-" + array_label) if useArray else "Object/Qtree"
+        if useArray:
+            backend = "Array-{}-{}".format(array_label, "grid" if useGrid else "brute")
+        else:
+            backend = "Object/Qtree"
         pygame.display.set_caption(
             "Boids Simulation - Boids: {0} - FPS: {1} - Backend: {2}".format(
                 flockLen, int(fps), backend))

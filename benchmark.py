@@ -58,7 +58,7 @@ def time_object_flock(n, frames, warmup):
     return elapsed / frames
 
 
-def time_array_flock(n, frames, warmup, xp):
+def time_array_flock(n, frames, warmup, xp, use_grid=False):
     """Per-frame time for the vectorized flock on backend `xp`. Returns ms/frame,
     or None if the GPU ran out of memory (the dense N*N matrices can exceed a
     small card's VRAM)."""
@@ -72,7 +72,7 @@ def time_array_flock(n, frames, warmup, xp):
             xp.cuda.runtime.deviceSynchronize()
 
     try:
-        flock = FlockArray(n, WIDTH, HEIGHT, seed=SEED, xp=xp)
+        flock = FlockArray(n, WIDTH, HEIGHT, seed=SEED, xp=xp, use_grid=use_grid)
         for _ in range(warmup):
             flock.step(mouse_pos=MOUSE)
         sync()
@@ -118,6 +118,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--gpu", action="store_true",
                     help="use CuPy for the array backend (Phase 2)")
+    ap.add_argument("--grid", action="store_true",
+                    help="use the spatial-hash grid neighbour search (Phase 3)")
     args = ap.parse_args()
 
     pygame.init()
@@ -125,8 +127,10 @@ def main():
 
     xp, backend_name = get_backend(args.gpu)
 
+    neighbour = "grid" if args.grid else "brute-force"
     print("Frames/sample: {}  (warmup {})".format(args.frames, args.warmup))
-    print("Array backend: {}\n".format(backend_name))
+    print("Array backend: {}  |  neighbour search: {}\n".format(
+        backend_name, neighbour))
     header = "{:>8}  {:>14}  {:>14}  {:>10}".format(
         "N", "quadtree ms", "array ms", "speedup")
     print(header)
@@ -134,7 +138,7 @@ def main():
 
     for n in args.sizes:
         obj_ms = time_object_flock(n, args.frames, args.warmup) * 1000
-        arr_ms = time_array_flock(n, args.frames, args.warmup, xp)
+        arr_ms = time_array_flock(n, args.frames, args.warmup, xp, args.grid)
         if arr_ms is None:
             print("{:>8}  {:>14.3f}  {:>14}  {:>10}".format(
                 n, obj_ms, "OOM", "-"))

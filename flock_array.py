@@ -41,16 +41,21 @@ SEPARATION_K = 385.0
 
 
 class FlockArray:
-    def __init__(self, n, width, height, seed=None, xp=np, dtype=None):
+    def __init__(self, n, width, height, seed=None, xp=np, dtype=None,
+                 use_grid=False):
         self.xp = xp
         self.w = float(width)
         self.h = float(height)
         self.dtype = dtype if dtype is not None else xp.float32
+        # Neighbour search: False -> brute-force O(N^2) distance matrix;
+        # True -> uniform spatial-hash grid (memory-light, scales past the
+        # dense matrix's VRAM ceiling). See _accumulate_grid.
+        self.use_grid = use_grid
 
         self._init_state(n, seed)
 
     @classmethod
-    def from_boids(cls, boids, width, height, xp=np, dtype=None):
+    def from_boids(cls, boids, width, height, xp=np, dtype=None, use_grid=False):
         """Build a flock from existing Boid objects (flock.py), copying every
         per-boid attribute so the array backend continues the *same* flock rather
         than a fresh random one. Used when toggling backends at runtime."""
@@ -59,6 +64,7 @@ class FlockArray:
         obj.w = float(width)
         obj.h = float(height)
         obj.dtype = dtype if dtype is not None else xp.float32
+        obj.use_grid = use_grid
         dt = obj.dtype
         obj.n = len(boids)
         obj._rng = np.random.default_rng()  # host RNG (see _init_state)
@@ -202,19 +208,14 @@ class FlockArray:
         V = self.vel
         n = self.n
 
-        # Pairwise differences and squared distances. diff[i, j] = P[i] - P[j].
-        dx = P[:, 0][:, None] - P[:, 0][None, :]            # (N, N)
-        dy = P[:, 1][:, None] - P[:, 1][None, :]
-        dist2 = dx * dx + dy * dy
+        # Neighbour accumulation: per boid, the count and the sums needed by the
+        # three rules. Both backends below return the same quantities, so the rule
+        # combination is identical regardless of how neighbours were found.
+        if self.use_grid:
+            count, sum_pos, sum_vel, sep = self._accumulate_grid()
+        else:
+            count, sum_pos, sum_vel, sep = self._accumulate_bruteforce()
 
-        # neighbor[i, j] == True when j is within boid i's radius and j != i.
-        # The radius is the *querying* boid's (asymmetric), as in the original.
-        neighbor = dist2 <= self.radius2[:, None]
-        idx = xp.arange(n)
-        neighbor[idx, idx] = False
-
-        neighbor_f = neighbor.astype(dt)
-        count = neighbor_f.sum(axis=1)                       # (N,)
         has_n = count > 0
         safe_count = xp.where(has_n, count, 1.0)              # avoid div-by-zero
 
@@ -222,27 +223,19 @@ class FlockArray:
 
         if useCohesion:
             # 0.004 * (mean(neighbor positions) - own position).
-            sum_pos = neighbor_f @ P                          # (N, 2)
             center = sum_pos / safe_count[:, None]
             acc = acc + 0.004 * (center - P)
 
         if useAlignment:
             # 0.5 * (mean(neighbor velocities) - own velocity).
-            sum_vel = neighbor_f @ V
             mean_vel = sum_vel / safe_count[:, None]
             acc = acc + 0.5 * (mean_vel - V)
 
         if useSeparation:
-            # (SEPARATION_K / N) * sum_j (P[i] - P[j]) / dist2.  Original
-            # normalizes then scales by 1/dist, i.e. v/|v| * 1/|v| = v/|v|^2;
-            # coincident pairs (dist2==0) contribute nothing. The weight scales
+            # (SEPARATION_K / N) * sum_j (P[i] - P[j]) / dist2; weight scales
             # inversely with the total flock size N.
-            safe_d2 = xp.where(dist2 > 0, dist2, 1.0)
-            inv = xp.where(neighbor & (dist2 > 0), 1.0 / safe_d2, 0.0).astype(dt)
-            sep_x = (inv * dx).sum(axis=1)
-            sep_y = (inv * dy).sum(axis=1)
             sep_factor = SEPARATION_K / n
-            acc = acc + sep_factor * xp.stack([sep_x, sep_y], axis=1)
+            acc = acc + sep_factor * sep
 
         # Boids with no neighbors get zero rule-acceleration (original returns 0).
         acc = acc * has_n[:, None]
@@ -278,6 +271,125 @@ class FlockArray:
 
         self.pos = P
         self.vel = V
+
+    # ------------------------------------------------------- neighbour search
+    def _accumulate_bruteforce(self):
+        """Neighbour sums via the dense O(N^2) pairwise distance matrix.
+        Returns (count, sum_pos, sum_vel, sep) where sum_pos/sum_vel are (N,2)
+        sums over each boid's neighbours and sep is the (N,2) separation vector."""
+        xp = self.xp
+        dt = self.dtype
+        P = self.pos
+        V = self.vel
+        n = self.n
+
+        dx = P[:, 0][:, None] - P[:, 0][None, :]            # (N, N)
+        dy = P[:, 1][:, None] - P[:, 1][None, :]
+        dist2 = dx * dx + dy * dy
+
+        # neighbor[i, j]: j within boid i's (asymmetric) radius and j != i.
+        neighbor = dist2 <= self.radius2[:, None]
+        idx = xp.arange(n)
+        neighbor[idx, idx] = False
+
+        neighbor_f = neighbor.astype(dt)
+        count = neighbor_f.sum(axis=1)
+        sum_pos = neighbor_f @ P
+        sum_vel = neighbor_f @ V
+
+        safe_d2 = xp.where(dist2 > 0, dist2, 1.0)
+        inv = xp.where(neighbor & (dist2 > 0), 1.0 / safe_d2, 0.0).astype(dt)
+        sep = xp.stack([(inv * dx).sum(axis=1), (inv * dy).sum(axis=1)], axis=1)
+        return count, sum_pos, sum_vel, sep
+
+    def _accumulate_grid(self):
+        """Neighbour sums via a uniform spatial-hash grid. Equivalent result to
+        _accumulate_bruteforce but never materialises an N x N array, so it scales
+        to far larger flocks within a small GPU's VRAM.
+
+        Cells are sized at the largest neighbour radius (R_max), so every boid's
+        neighbours (radius <= R_max) lie within its own cell or the 8 around it
+        (a 3x3 block). Boids are bucketed into a dense (n_cells, max_occupancy)
+        table of indices via a counting sort; the 3x3 candidates are then gathered
+        and filtered by each boid's actual radius. Work scales with cell occupancy
+        rather than N^2 (worst case degrades only if boids pile into one cell)."""
+        xp = self.xp
+        dt = self.dtype
+        P = self.pos
+        V = self.vel
+        n = self.n
+        px = P[:, 0]
+        py = P[:, 1]
+        vx = V[:, 0]
+        vy = V[:, 1]
+
+        cell_size = float(self.radius.max())
+        if cell_size <= 0:
+            cell_size = 1.0
+        gw = max(1, int(np.ceil(self.w / cell_size)))
+        gh = max(1, int(np.ceil(self.h / cell_size)))
+        ncells = gw * gh
+
+        cx = xp.clip((px / cell_size).astype(xp.int64), 0, gw - 1)
+        cy = xp.clip((py / cell_size).astype(xp.int64), 0, gh - 1)
+        cell = cy * gw + cx                                  # (N,)
+
+        # Counting sort into a (ncells, maxslots) table of boid indices (-1 pad).
+        order = xp.argsort(cell)
+        sorted_cell = cell[order]
+        counts = xp.bincount(cell, minlength=ncells)
+        maxslots = int(counts.max())
+        cell_start = xp.zeros(ncells, dtype=xp.int64)
+        cell_start[1:] = xp.cumsum(counts)[:-1]
+        slot = xp.arange(n) - cell_start[sorted_cell]
+        table = xp.full((ncells, maxslots), -1, dtype=xp.int64)
+        table[sorted_cell, slot] = order
+
+        count = xp.zeros(n, dtype=dt)
+        sum_px = xp.zeros(n, dtype=dt)
+        sum_py = xp.zeros(n, dtype=dt)
+        sum_vx = xp.zeros(n, dtype=dt)
+        sum_vy = xp.zeros(n, dtype=dt)
+        sep_x = xp.zeros(n, dtype=dt)
+        sep_y = xp.zeros(n, dtype=dt)
+        r2c = self.radius2[:, None]
+        my_idx = xp.arange(n)[:, None]
+
+        # Visit the 3x3 block of cells around each boid. Each offset maps to a
+        # distinct neighbour cell (out-of-range offsets are masked, not clamped,
+        # so edge cells are never double-counted). The slot dimension is fully
+        # vectorised: for each offset we gather every boid's whole candidate cell
+        # at once as an (N, maxslots) array and reduce, so the per-frame kernel
+        # count stays small (~9 offsets) instead of 9 * maxslots.
+        for ox in (-1, 0, 1):
+            nbx = cx + ox
+            in_x = (nbx >= 0) & (nbx < gw)
+            for oy in (-1, 0, 1):
+                nby = cy + oy
+                in_range = in_x & (nby >= 0) & (nby < gh)    # (N,)
+                ncell = xp.where(in_range, nby * gw + nbx, 0)
+                J = table[ncell]                             # (N, maxslots)
+                valid = in_range[:, None] & (J >= 0) & (J != my_idx)
+                JJ = xp.where(valid, J, 0)                    # safe gather indices
+                ddx = px[:, None] - px[JJ]                    # (N, maxslots)
+                ddy = py[:, None] - py[JJ]
+                d2 = ddx * ddx + ddy * ddy
+                within = valid & (d2 <= r2c)
+                w = within.astype(dt)
+                count = count + w.sum(axis=1)
+                sum_px = sum_px + (w * px[JJ]).sum(axis=1)
+                sum_py = sum_py + (w * py[JJ]).sum(axis=1)
+                sum_vx = sum_vx + (w * vx[JJ]).sum(axis=1)
+                sum_vy = sum_vy + (w * vy[JJ]).sum(axis=1)
+                inv = xp.where(within & (d2 > 0),
+                               1.0 / xp.where(d2 > 0, d2, 1.0), 0.0).astype(dt)
+                sep_x = sep_x + (inv * ddx).sum(axis=1)
+                sep_y = sep_y + (inv * ddy).sum(axis=1)
+
+        sum_pos = xp.stack([sum_px, sum_py], axis=1)
+        sum_vel = xp.stack([sum_vx, sum_vy], axis=1)
+        sep = xp.stack([sep_x, sep_y], axis=1)
+        return count, sum_pos, sum_vel, sep
 
     def _avoid_mouse(self, mouse_pos):
         """Vectorized port of Flock.avoidMouse: boids whose neighbor-circle contains

@@ -564,3 +564,65 @@ C. SEPARATION WEIGHT SCALES WITH FLOCK SIZE  (commit aeb42a7)
 
 Status: Phase 2 (GPU backend) complete and verified. Remaining: Phase 3 (GPU
 spatial-hash grid) to get past the ~1 GB VRAM / O(N^2) ceiling.
+
+
+========================================
+FIFTH PASS - SPATIAL-HASH GRID NEIGHBOUR SEARCH (Phase 3)
+========================================
+
+Branch: spatial-hashing
+Date: 2026-06-28
+
+Goal: replace the brute-force O(N^2) distance matrix with a memory-light spatial
+grid so the flock can scale past the dense matrix's ~1 GB VRAM ceiling (which
+OOM'd around N~5000 on this GPU).
+
+32. flock_array.py: step() refactored into a shared rule-combiner + two pluggable
+    neighbour accumulators, selected by a new use_grid flag (constructor and
+    from_boids). Both return the same (count, sum_pos, sum_vel, sep), so the rule
+    math downstream is identical regardless of how neighbours were found.
+      - _accumulate_bruteforce(): the existing dense N x N path, unchanged.
+      - _accumulate_grid(): the new spatial-hash grid (below).
+
+33. flock_array.py: _accumulate_grid()
+    Uniform grid with cell size = R_max (the largest neighbour radius). Because
+    every boid's radius <= R_max, all its neighbours fall in its own cell or the
+    8 around it (a 3x3 block). Boids are counting-sorted into a dense
+    (n_cells, max_occupancy) table of indices (argsort by cell, bincount/cumsum
+    for offsets, scatter into the table). For each of the 9 cell offsets the whole
+    candidate cell is gathered at once as an (N, max_occupancy) array and reduced
+    -- the slot dimension is fully vectorised, so the per-frame kernel count stays
+    ~9 instead of 9 * max_occupancy (an earlier slot-loop version was launch-bound
+    at ~2400 ms/frame; vectorising the slots fixed it). Out-of-range offsets are
+    masked, not clamped, so edge cells are never double-counted; self is excluded
+    via j != i.
+
+34. benchmark.py: --grid flag (threads use_grid into the array flock); header
+    shows the neighbour-search method.
+
+35. main.py: --grid flag and runtime key 7 to toggle grid vs brute-force on the
+    array backend; the caption shows Array-<backend>-grid vs -brute.
+
+CORRECTNESS: grid vs brute-force on identical init -> count diff exactly 0 (same
+neighbour sets); sums differ only by float32 summation order (sum_pos ~4e-3).
+Trajectories stay together over 60 steps (mean pos diff ~4e-5).
+
+PERFORMANCE (headless, physics only):
+  CPU (NumPy) grid vs quad-tree:  N=1000 8.6x, N=3000 4.0x.
+  GPU (CuPy)  grid vs quad-tree:  N=2000 5.4x, N=5000 9.0x, N=8000 9.6x.
+  GPU grid vs GPU brute-force:    brute wins below ~N=4000 (grid has fixed
+    sort/table overhead); grid wins above, and runs at N=8000-15000 where brute
+    OOMs. Grid roughly triples the max flock size on the 1 GB card (~5k -> ~15-20k).
+
+CAVEATS:
+  - Not asymptotically O(N): cell size is pinned to R_max for correctness, so on
+    a fixed screen n_cells is fixed and cost is ~O(N^2 / n_cells) -- a large
+    constant-factor win (and the big memory win), not linear. An outlier large
+    radius inflates cell size and hurts efficiency.
+  - Below ~N=1000 brute-force is faster; use grid for large N.
+  - Windows GPU TDR watchdog: a single grid step taking >~2 s (roughly N>15k
+    here) can reset the driver for that process. Keep steps under ~1 s.
+
+Status: Phase 3 (spatial-hash grid) complete and verified. Possible future work:
+sub-R_max cells with a per-boid variable search ring (true O(N) scaling), or
+batched rendering to lift the per-boid draw-loop Amdahl ceiling at large N.
